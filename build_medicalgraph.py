@@ -6,7 +6,8 @@
 
 import os
 import json
-from py2neo import Graph,Node
+import pandas as pd
+
 
 class MedicalGraph:
     def __init__(self):
@@ -264,11 +265,257 @@ class MedicalGraph:
         return
 
 
+class CVDKnowledgeGraphBuilder(MedicalGraph):
+    """Class
+
+    kg = CVDKnowledgeGraphBuilder()
+    kg.export_csv()
+
+    $ bin/neo4j-admin database import full cvd --nodes=import/node_disease.csv --nodes=import/node_check.csv --nodes=import/node_symptom.csv --nodes import/node_drug.csv --nodes import/node_food.csv --relationships=import/rel_check.csv --relationships import/rel_symptom.csv --relationships import/rel_drug.csv --relationships import/rel_doeat.csv --relationships import/rel_noteat.csv --relationships import/rel_recipe.csv
+    """
+    def __init__(self):
+        self.data_path = os.path.join('data/medical.json')
+
+    def filter_CVD(self):
+        Drugs, Foods, Checks, Departments, Producers, Symptoms, Diseases, disease_infos,rels_check, rels_recommandeat, rels_noteat, rels_doeat, rels_department, rels_commonddrug, rels_drug_producer, rels_recommanddrug, rels_symptom, rels_acompany, rels_category = self.read_nodes()
+        CVD_diseases = set([r[0] for r in rels_category if r[1] in ['心内科', '心胸外科']])
+        CVD_diseases -= set([d for d in CVD_diseases if re.search('(胸|肺|肋|膈|食管|气管)', d)])
+
+        # rels_commondrug_cvd = [tuple(r) for r in rels_commonddrug if r[0] in CVD_diseases]
+        rels_drug_cvd = [tuple(r) for r in rels_recommanddrug if r[0] in CVD_diseases]
+        CVD_Drugs = set(c[1] for c in rels_drug_cvd)
+
+        rels_recommandeat_cvd = [tuple(r) for r in rels_recommandeat if r[0] in CVD_diseases]
+        rels_doeat_cvd = [tuple(r) for r in rels_doeat if r[0] in CVD_diseases]
+        rels_noteat_cvd = [tuple(r) for r in rels_noteat if r[0] in CVD_diseases]
+        CVD_Foods = set([r[1] for r in rels_doeat_cvd + rels_noteat_cvd + rels_recommandeat_cvd])
+
+        rels_check_cvd = [r for r in rels_check if r[0] in CVD_diseases]
+        CVD_Checks = set(c[1] for c in rels_check_cvd)
+
+        rels_symptom_cvd = [r for r in rels_symptom if r[0] in CVD_diseases]
+        CVD_Symptoms = set(c[1] for c in rels_symptom_cvd)
+
+        rels_acompany_cvd = [r for r in rels_acompany if r[0] in CVD_diseases]
+        Related_diseases = set(c[1] for c in rels_acompany_cvd) - CVD_diseases
+
+        return CVD_diseases, Related_diseases, CVD_Drugs, CVD_Foods, CVD_Checks, \
+            CVD_Symptoms, rels_commondrug_cvd, rels_recommanddrug_cvd, \
+            rels_recommandeat_cvd, rels_doeat_cvd, rels_noteat_cvd, \
+            rels_check_cvd, rels_symptom_cvd, rels_acompany_cvd
+
+    def export_csv2(self):
+        """都改成 name"""
+        CVD_diseases, Related_diseases, CVD_Drugs, CVD_Foods, CVD_Checks, \
+            CVD_Symptoms, rels_commondrug_cvd, rels_recommanddrug_cvd, \
+            rels_recommandeat_cvd, rels_doeat_cvd, rels_noteat_cvd, \
+            rels_check_cvd, rels_symptom_cvd, rels_acompany_cvd = self.filter_CVD()
+
+        df_disease = pd.DataFrame(
+            {'name': list(CVD_diseases)+list(Related_diseases),
+             ':LABEL': ['心血管及心脏疾病']*len(CVD_diseases) + \
+             ['并发症']*len(Related_diseases)})
+        df_disease.to_csv('node_disease.csv', index_label='diseaseId:ID(Disease-ID)')
+        disease2index = df_disease.reset_index().set_index('name')['index']
+
+        df_check = pd.DataFrame(list(CVD_Checks), columns=['name'])
+        df_check[":LABEL"] = '检查'
+        df_check.to_csv('node_check.csv', index_label='checkId:ID(Check-ID)')
+        check2index = df_check.reset_index().set_index('name')['index']
+
+        df_symptom = pd.DataFrame(list(CVD_Symptoms), columns=['name'])
+        df_symptom[":LABEL"] = '症状'
+        df_symptom.to_csv('node_symptom.csv', index_label='symptomId:ID(Symptom-ID)')
+        symptom2index = df_symptom.reset_index().set_index('name')['index']
+
+        df_drug = pd.DataFrame(list(CVD_Drugs), columns=['name'])
+        df_drug[":LABEL"] = '药物'
+        df_drug.to_csv('node_drug.csv', index_label='drugId:ID(Drug-ID)')
+        drug2index = df_drug.reset_index().set_index('name')['index']
+
+        df_food = pd.DataFrame(list(CVD_Foods), columns=['name'])
+        df_food[":LABEL"] = '食物'
+        df_food.to_csv('node_food.csv', index_label='foodId:ID(Food-ID)')
+        food2index = df_food.reset_index().set_index('name')['index']
+
+        df_rel_check = pd.DataFrame.from_records(
+            rels_check_cvd, columns=['disease', 'check'])
+        df_rel_check[':START_ID(Disease-ID)'] = df_rel_check['disease'].map(disease2index)
+        df_rel_check[':END_ID(Check-ID)'] = df_rel_check['check'].map(check2index)
+        df_rel_check[':TYPE'] = 'NEED_CHECK'
+        df_rel_check.drop(['disease', 'check'], axis=1, inplace=True)
+        df_rel_check.to_csv('rel_check.csv', index=False)
+
+        df_rel_symptom = pd.DataFrame.from_records(
+            rels_symptom_cvd, columns=['disease', 'symptom'])
+        df_rel_symptom[':START_ID(Disease-ID)'] = df_rel_symptom['disease'].map(disease2index)
+        df_rel_symptom[':END_ID(Symptom-ID)'] = df_rel_symptom['symptom'].map(symptom2index)
+        df_rel_symptom[':TYPE'] = 'HAS_SYMPTOM'
+        df_rel_symptom.drop(['disease', 'symptom'], axis=1, inplace=True)
+        df_rel_symptom.to_csv('rel_symptom.csv', index=False)
+
+        df_rel_drug = pd.DataFrame.from_records(
+            rels_drug_cvd, columns=['disease', 'drug'])
+        df_rel_drug[':START_ID(Disease-ID)'] = df_rel_drug['disease'].map(disease2index)
+        df_rel_drug[':END_ID(Drug-ID)'] = df_rel_drug['drug'].map(drug2index)
+        df_rel_drug[':TYPE'] = 'USE_DRUG'
+        df_rel_drug.drop(['disease', 'drug'], axis=1, inplace=True)
+        df_rel_drug.to_csv('rel_drug.csv', index=False)
+
+        df_rel_doeat = pd.DataFrame.from_records(
+            rels_doeat_cvd, columns=['disease', 'doeat'])
+        df_rel_doeat[':START_ID(Disease-ID)'] = df_rel_doeat['disease'].map(disease2index)
+        df_rel_doeat[':END_ID(Food-ID)'] = df_rel_doeat['doeat'].map(food2index)
+        df_rel_doeat[':TYPE'] = 'CAN_EAT'
+        df_rel_doeat.drop(['disease', 'doeat'], axis=1, inplace=True)
+        df_rel_doeat.to_csv('rel_doeat.csv', index=False)
+
+        df_rel_noteat = pd.DataFrame.from_records(
+            rels_noteat_cvd, columns=['disease', 'noteat'])
+        df_rel_noteat[':START_ID(Disease-ID)'] = df_rel_noteat['disease'].map(disease2index)
+        df_rel_noteat[':END_ID(Food-ID)'] = df_rel_noteat['noteat'].map(food2index)
+        df_rel_noteat[':TYPE'] = 'CANNOT_EAT'
+        df_rel_noteat.drop(['disease', 'noteat'], axis=1, inplace=True)
+        df_rel_noteat.to_csv('rel_noteat.csv', index=False)
+
+        df_rel_recipe = pd.DataFrame.from_records(
+            rels_recommandeat_cvd, columns=['disease', 'recipe'])
+        df_rel_recipe[':START_ID(Disease-ID)'] = df_rel_recipe['disease'].map(disease2index)
+        df_rel_recipe[':END_ID(Food-ID)'] = df_rel_recipe['recipe'].map(food2index)
+        df_rel_recipe[':TYPE'] = 'RECOMMEND_EAT'
+        df_rel_recipe.drop(['disease', 'recipe'], axis=1, inplace=True)
+        df_rel_recipe.to_csv('rel_recipe.csv', index=False)
+
+    def export_csv(self):
+        CVD_diseases, Related_diseases, CVD_Drugs, CVD_Foods, CVD_Checks, \
+            CVD_Symptoms, rels_commondrug_cvd, rels_recommanddrug_cvd, \
+            rels_recommandeat_cvd, rels_doeat_cvd, rels_noteat_cvd, \
+            rels_check_cvd, rels_symptom_cvd, rels_acompany_cvd = self.filter_CVD()
+
+        df_disease = pd.DataFrame(
+            {'Disease': list(CVD_diseases)+list(Related_diseases),
+             ':LABEL': ['心血管及心脏疾病']*len(CVD_diseases) + \
+             ['并发症']*len(Related_diseases)})
+        df_disease.to_csv('node_disease.csv', index_label='diseaseId:ID(Disease-ID)')
+        disease2index = df_disease.reset_index().set_index('Disease')['index']
+
+        df_check = pd.DataFrame(list(CVD_Checks), columns=['Check'])
+        df_check[":LABEL"] = '检查'
+        df_check.to_csv('node_check.csv', index_label='checkId:ID(Check-ID)')
+        check2index = df_check.reset_index().set_index('Check')['index']
+
+        df_symptom = pd.DataFrame(list(CVD_Symptoms), columns=['Symptom'])
+        df_symptom[":LABEL"] = '症状'
+        df_symptom.to_csv('node_symptom.csv', index_label='symptomId:ID(Symptom-ID)')
+        symptom2index = df_symptom.reset_index().set_index('Symptom')['index']
+
+        df_drug = pd.DataFrame(list(CVD_Drugs), columns=['Drug'])
+        df_drug[":LABEL"] = '药物'
+        df_drug.to_csv('node_drug.csv', index_label='drugId:ID(Drug-ID)')
+        drug2index = df_drug.reset_index().set_index('Drug')['index']
+
+        df_food = pd.DataFrame(list(CVD_Foods), columns=['Food'])
+        df_food[":LABEL"] = '食物'
+        df_food.to_csv('node_food.csv', index_label='foodId:ID(Food-ID)')
+        food2index = df_food.reset_index().set_index('Food')['index']
+
+        df_rel_check = pd.DataFrame.from_records(
+            rels_check_cvd, columns=['disease', 'check'])
+        df_rel_check[':START_ID(Disease-ID)'] = df_rel_check['disease'].map(disease2index)
+        df_rel_check[':END_ID(Check-ID)'] = df_rel_check['check'].map(check2index)
+        df_rel_check[':TYPE'] = 'NEED_CHECK'
+        df_rel_check.drop(['disease', 'check'], axis=1, inplace=True)
+        df_rel_check.to_csv('rel_check.csv', index=False)
+
+        df_rel_symptom = pd.DataFrame.from_records(
+            rels_symptom_cvd, columns=['disease', 'symptom'])
+        df_rel_symptom[':START_ID(Disease-ID)'] = df_rel_symptom['disease'].map(disease2index)
+        df_rel_symptom[':END_ID(Symptom-ID)'] = df_rel_symptom['symptom'].map(symptom2index)
+        df_rel_symptom[':TYPE'] = 'HAS_SYMPTOM'
+        df_rel_symptom.drop(['disease', 'symptom'], axis=1, inplace=True)
+        df_rel_symptom.to_csv('rel_symptom.csv', index=False)
+
+        df_rel_drug = pd.DataFrame.from_records(
+            rels_drug_cvd, columns=['disease', 'drug'])
+        df_rel_drug[':START_ID(Disease-ID)'] = df_rel_drug['disease'].map(disease2index)
+        df_rel_drug[':END_ID(Drug-ID)'] = df_rel_drug['drug'].map(drug2index)
+        df_rel_drug[':TYPE'] = 'USE_DRUG'
+        df_rel_drug.drop(['disease', 'drug'], axis=1, inplace=True)
+        df_rel_drug.to_csv('rel_drug.csv', index=False)
+
+        df_rel_doeat = pd.DataFrame.from_records(
+            rels_doeat_cvd, columns=['disease', 'doeat'])
+        df_rel_doeat[':START_ID(Disease-ID)'] = df_rel_doeat['disease'].map(disease2index)
+        df_rel_doeat[':END_ID(Food-ID)'] = df_rel_doeat['doeat'].map(food2index)
+        df_rel_doeat[':TYPE'] = 'CAN_EAT'
+        df_rel_doeat.drop(['disease', 'doeat'], axis=1, inplace=True)
+        df_rel_doeat.to_csv('rel_doeat.csv', index=False)
+
+        df_rel_noteat = pd.DataFrame.from_records(
+            rels_noteat_cvd, columns=['disease', 'noteat'])
+        df_rel_noteat[':START_ID(Disease-ID)'] = df_rel_noteat['disease'].map(disease2index)
+        df_rel_noteat[':END_ID(Food-ID)'] = df_rel_noteat['noteat'].map(food2index)
+        df_rel_noteat[':TYPE'] = 'CANNOT_EAT'
+        df_rel_noteat.drop(['disease', 'noteat'], axis=1, inplace=True)
+        df_rel_noteat.to_csv('rel_noteat.csv', index=False)
+
+        df_rel_recipe = pd.DataFrame.from_records(
+            rels_recommandeat_cvd, columns=['disease', 'recipe'])
+        df_rel_recipe[':START_ID(Disease-ID)'] = df_rel_recipe['disease'].map(disease2index)
+        df_rel_recipe[':END_ID(Food-ID)'] = df_rel_recipe['recipe'].map(food2index)
+        df_rel_recipe[':TYPE'] = 'RECOMMEND_EAT'
+        df_rel_recipe.drop(['disease', 'recipe'], axis=1, inplace=True)
+        df_rel_recipe.to_csv('rel_recipe.csv', index=False)
+
+
+class KnowledgeGraphBuilder:
+    """
+    from neo4j import GraphDatabase, RoutingControl
+    URI = "neo4j://localhost:7687"
+    AUTH = ("neo4j", "12345678")
+    """
+    def __init__(self, driver):
+        self.driver = driver
+
+    def close(self):
+        self.driver.close()
+
+    def create_graph(self, diseases, drugs, associations):
+        with self.driver.session() as session:
+            # Create Disease nodes
+            for disease in diseases:
+                session.execute_write(self._create_disease_node, disease)
+
+            # Create Drug nodes
+            for drug in drugs:
+                session.execute_write(self._create_drug_node, drug)
+
+            # Create Disease-Drug relationships
+            for association in associations:
+                disease, drug = association
+                session.execute_write(self._create_association, disease, drug)
+
+    @staticmethod
+    def _create_disease_node(tx, disease_name):
+        tx.run("MERGE (d:Disease {name: $name})", name=disease_name)
+
+    @staticmethod
+    def _create_drug_node(tx, drug_name):
+        tx.run("MERGE (d:Drug {name: $name})", name=drug_name)
+
+    @staticmethod
+    def _create_association(tx, disease_name, drug_name):
+        tx.run("""
+            MATCH (d:Disease {name: $disease_name})
+            MATCH (dr:Drug {name: $drug_name})
+            MERGE (d)-[:TREATS]->(dr)
+        """, disease_name=disease_name, drug_name=drug_name)
+
 
 if __name__ == '__main__':
     handler = MedicalGraph()
     print("step1:导入图谱节点中")
     handler.create_graphnodes()
-    print("step2:导入图谱边中")      
+    print("step2:导入图谱边中")
     handler.create_graphrels()
-    
+
